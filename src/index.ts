@@ -1,16 +1,15 @@
 var nodeshout = require('nodeshout');
-const FileReadStream = require('./FileReadStream');
-const ShoutStream = require('./ShoutStream');
 import express from 'express';
 const { Storage } = require('@google-cloud/storage');
-import Player from './Player';
-const sqlite3 = require('sqlite3').verbose();
 const apiKey = "AIzaSyBwwMIWgAwA7Fs3gbZbmEGLqLqANdqOfaM";
 const bucketName = "dreamcast-88cc9.appspot.com";
-const db = require('./database.js');
-const firebaseApp = require('./firebase.js');
+const { db } = require('./firebase.js');
 const path = require('path');
-const { getDatabase, ref, child, get } = require("firebase/database");
+import { collection, doc, getDoc, getDocs, query, where, orderBy, updateDoc } from "firebase/firestore";
+import { TrackType } from './types/API';
+const FileReadStream = require('./FileReadStream');
+const ShoutStream = require('./ShoutStream');
+const fs = require('fs');
 
 nodeshout.init();
 const app = express();
@@ -23,102 +22,106 @@ const port = 3000;
 
 app.listen(port);
 
-app.get('/', async (req, res) => {
-  var sql = "select * from playlist";
-  var params = [];
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      res.status(400).json({ "error": err.message });
-      return;
-    }
-    res.json({
-      "message": "success",
-      "data": rows
-    });
+async function fetchTracks(id: string): Promise<any[]> {
+  const tracks = query(collection(db, 'tracks'), where('station_id', '==', id), orderBy('order', 'asc'));
+  const querySnapshot = await getDocs(tracks);
+  return querySnapshot.docs.map(d => {
+    return {
+      id: d.id,
+      ...d.data()
+    } as TrackType;
   });
-});
+}
 
+const fileTracks = [
+  'juice.mp3',
+  'test.mp3'
+];
 
-app.post('/start/:artistId', async (req, res) => {
-  const artistId = req.params.artistId;
+app.post('/start/:userId/:stationId', async (req, res) => {
+  const { userId, stationId } = req.params;
+  console.log("STARTING");
 
-  const dbRef = ref(getDatabase());
-  let isStreaming = false;
+  const tracks = await fetchTracks(stationId)
+    .catch(e => console.log(e));
 
-  get(child(dbRef, `playlists/${artistId}`)).then((snapshot) => {
-    if (snapshot.exists()) {
-      console.log(snapshot.val());
-      const state = snapshot.val();
-      if (!state) {
-        console.log("no server state");
-        return;
-      }
-      if (state.isStreaming === 0) isStreaming = false;
-      if (state.isStreaming === 1) isStreaming = true;
-
-    } else {
-      console.log("No data available");
-    }
-  }).catch((error) => {
-    console.error(error);
-  });
-  console.log("ARTIST ID: ", artistId);
-  console.log("IS STREAMING: ", isStreaming);
-  if (!artistId) {
-    res.status(400).send("No artistId provided");
+  if (!tracks || tracks.length === 0) {
+    return res.json({ status: false, message: 'No tracks found' });
   }
-  // const songList = await getSongList(artistId);
-  // if (songList.length === 0) {
-  //   res.status(400).send("No songs found");
-  // }
-  // console.log("HERE");
-  res.send("Success");
 
-  //get all file names from the artistId folder in storage bucket
-  //add those files to the sqlite db playlist table
-  //initialize stream to icecast
-  //on play, set streaming to true in sqlite db
-  //on pause, set streaming to false in sqlite db
-  //on stop, set streaming to false in sqlite db
-  //on error, set streaming to false in sqlite db
-  //on end, check if there is another file in the playlist
+  const stationRef = doc(db, "stations", stationId);
+  const station = await getDoc(stationRef);
 
-  // var shout = nodeshout.create();
-  // shout.setHost('192.53.163.108');
-  // shout.setPort(8000);
-  // shout.setUser('source');
-  // shout.setPassword('VerySecretCode00');
-  // shout.setMount('test');
-  // shout.setFormat(1); // 0=ogg, 1=mp3
-  // shout.setAudioInfo('bitrate', '192');
-  // shout.setAudioInfo('samplerate', '44100');
-  // shout.setAudioInfo('channels', '2');
-  // shout.open();
+  if (!station.exists()) {
+    return res.json({ status: false, message: 'Station not found' });
+  }
 
-  //get updated song list from storage
-  //update user playlist with new song list and set current index to 0
-  //get playlist info from sqlite db
-  //loop through playlist and stream each song
-  //when first stream is started set streaming to true in sqlite db and return status to client
-  //when stream ends, check if there is another song in the playlist
-  //if there is, stream the next song and update the current index in the sqlite db
-  //if there is not, set streaming to false in sqlite db and return status to client
+  await updateDoc(stationRef, {
+    playing: true
+  })
+    .catch(e => {
+      console.log(e);
+      res.json({ status: false, message: 'Error updating station' });
+    });
 
+  var shout = nodeshout.create();
+  shout.setHost('192.53.163.108');
+  shout.setPort(8000);
+  shout.setUser('source');
+  shout.setPassword('VerySecretCode00');
+  shout.setMount(stationId);
+  shout.setFormat(1); // 0=ogg, 1=mp3
+  shout.setAudioInfo('bitrate', '192');
+  shout.setAudioInfo('samplerate', '44100');
+  shout.setAudioInfo('channels', '2');
+  shout.open();
 
-  // await storage
-  //   .bucket(bucketName)
-  //   .file(file)
-  //   .createReadStream() //stream is created
-  //   .pipe(new ShoutStream(shout))
-  //   .on('finish', () => {
-  //     console.log('finished');
-  //   })
-  //   .on('error', (err) => {
-  //     console.log(err);
-  //   });
+  playFromDownload(shout, tracks, 0);
 
-
+  res.json({ status: true, message: 'Started stream' });
 });
+
+
+
+
+async function streamToIcecast(shout: any, tracks: TrackType[], index: number) {
+  console.log("index: ", index);
+
+  const shoutStream = new ShoutStream(shout);
+  const track = tracks[index];
+  console.log("playing: ", track.name);
+
+
+  try {
+    const res = await storage
+      .bucket(bucketName)
+      .file(track.id)
+      .createReadStream() //stream is created
+      .pipe(shoutStream)
+
+      .on('finish', async () => {
+        console.log('finished playing: ', track.id, " ", track.name);
+        index = index + 1;
+        streamToIcecast(shout, tracks, index);
+        // const stationRef = doc(db, "stations", track.station_id);
+        // const stationSnap = await getDoc(stationRef).catch(e => console.log(e));
+        // if (stationSnap && stationSnap.exists() && stationSnap.data().playing) {
+        //   console.log("STILL PLAYING");
+        //   index = (index + 1) % tracks.length;
+        //   await updateDoc(stationRef, {
+        //     current_index: index
+        //   });
+        //   setTimeout(() => {
+        //     streamToIcecast(shout, tracks, index);
+        //   }, 4000);
+        // } else {
+        //   console.log("NOT PLAYING");
+        // }
+      });
+  } catch (e) {
+    console.log(e);
+  }
+}
 
 app.get('/stream', (req, res) => {
   const path = __dirname + '/audio' + '/' + 'test.mp3';
@@ -135,31 +138,107 @@ app.get('/stream', (req, res) => {
   shout.setAudioInfo('channels', '2');
   shout.open();
 
-  play(shout, path);
+  // play(shout, path);
 
 });
 
-function play(shout, path) {
+function play(shout, track: string) {
+  const path = __dirname + '/audio' + '/' + track;
   const fileStream = new FileReadStream(path, 65536);
+  const shoutStream = fileStream.pipe(new ShoutStream(shout));
+  fileStream.on('data', function (chunk) {
+    console.log('Read %d bytes of data', chunk.length);
+  });
+  shoutStream.on('error', () => {
+    console.log('Error streaming file...');
+  });
+  shoutStream.on('connect', () => {
+    console.log('Connected...');
+  });
+  shoutStream.on('finish', function () {
+    console.log('Finished playing...' + path);
+    play(shout, fileTracks[1]);
+  });
+}
+
+async function playStream(shout: any, tracks: TrackType[], index: number) {
+  const track = tracks[index];
+
+  console.log('now playing: ', track.name);
+
+  // Get the file from GCS
+  const gcsReadStream = storage.bucket(bucketName).file(track.id).createReadStream();
+  const shoutStream = gcsReadStream.pipe(new ShoutStream(shout));
+
+  gcsReadStream.on('error', function (e) {
+    console.log('Error streaming file... ', e);
+  });
+
+  shoutStream.on('error', () => {
+    console.log('Error streaming file...');
+  });
+
+  shoutStream.on('connect', () => {
+    console.log('Connected...');
+  });
+
+  shoutStream.on('finish', function () {
+    console.log('Finished playing...' + track.name);
+    const newIndex = (index + 1) % tracks.length;
+    setTimeout(() => {
+      playStream(shout, tracks, newIndex); // Using modulo for infinite loop
+    }, 8000);
+  });
+}
+
+
+async function downloadFile(bucketName, srcFilename, destFilename) {
+  const options = {
+    destination: destFilename,
+  };
+
+  // Downloads the file
+  await storage.bucket(bucketName).file(srcFilename).download(options);
+  console.log(`Downloaded ${srcFilename} to ${destFilename}`);
+}
+
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function playFromDownload(shout: any, tracks: TrackType[], index: number) {
+
+  const track = tracks[index];
+
+  // Define a local path where you'll download the file
+  const localPath = __dirname + '/audio/' + track.id + '.mp3';
+
+  await downloadFile(bucketName, track.id, localPath);
+
+  const fileStream = new FileReadStream(localPath, 65536);
   const shoutStream = fileStream.pipe(new ShoutStream(shout));
 
   fileStream.on('data', function (chunk) {
     console.log('Read %d bytes of data', chunk.length);
   });
 
-  shoutStream.on('finish', function () {
-    console.log('Finished playing...' + path);
+  shoutStream.on('error', () => {
+    console.log('Error streaming file...');
   });
-}
 
-async function getSongList(artistId: string) {
-  const songList: string[] = [];
-  const [files] = await storage.bucket(bucketName).getFiles({ prefix: 'Alden/' });
-  if (files) {
-    files.forEach(file => {
-      songList.push(path.basename(file.name));
-    });
-  }
-  console.log("SONG LIST: ", songList);
-  return songList;
+  shoutStream.on('connect', () => {
+    console.log('Connected...');
+  });
+
+  shoutStream.on('finish', function () {
+    try {
+      console.log('Finished playing...' + localPath);
+      if (fs.existsSync(localPath)) {
+        fs.unlinkSync(localPath);  // Delete the downloaded file after streaming
+      }
+      const newIndex = (index + 1) % tracks.length;
+      playFromDownload(shout, tracks, newIndex);
+    } catch (e) {
+      console.log(e);
+    }
+  });
 }

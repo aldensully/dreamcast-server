@@ -1,5 +1,9 @@
 const { initializeApp } = require('firebase/app');
+const { getFirestore } = require('firebase/firestore');
+const { getAuth } = require("firebase/auth")
+const { getStorage } = require("firebase/storage");
 
+// Initialize Firebase
 const firebaseConfig = {
   apiKey: "AIzaSyBwwMIWgAwA7Fs3gbZbmEGLqLqANdqOfaM",
   authDomain: "dreamcast-88cc9.firebaseapp.com",
@@ -10,6 +14,15 @@ const firebaseConfig = {
   measurementId: "G-Z2NJVBK5LL"
 };
 
-const firebaseApp = initializeApp(firebaseConfig);
 
-module.exports = firebaseApp;
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const storage = getStorage(app)
+const auth = getAuth(app)
+
+module.exports = {
+  app,
+  db,
+  storage,
+  auth
+}
